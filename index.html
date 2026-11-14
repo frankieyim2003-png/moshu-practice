@@ -199,7 +199,7 @@
     <p class="hint hidden" id="sentenceBothNote">未有官方句子，所以而家撳開始只會練詞語。想練句子，請用「自訂」，或者等官方句子加好。</p>
 
     <div id="customPanel" class="hidden">
-      <p class="hint">影相或者自己打。詞語同句子分開，一行一個。標點（，。？！、；：「」『』…—（）等）會保留；行首嘅 1. 或 1、會去掉。自訂內容冇預製錄音，用系統語音朗讀，並且鎖定普通話（zh-CN）。香港 iPhone 有時仍然會讀成廣東話，呢個限制未解決。</p>
+      <p class="hint">影相或者自己打。詞語同句子分開，一行一個。標點（，。？！、；：「」『』…—（）等）會保留；行首嘅 1. 或 1、會去掉。自訂內容用網絡普通話（zh-CN）錄音播放，唔靠手機系統語音，所以香港 iPhone 唔會讀成廣東話。要有網絡；文字會送到語音服務合成，唔會存喺呢個網頁。</p>
       <div class="photo-btn-wrap">
         <button type="button" class="btn primary big" id="pickPhoto">📷 影相／揀相</button>
         <input type="file" id="photoPick" accept="image/*" capture="environment"/>
@@ -215,7 +215,7 @@
       <textarea class="ocr sentences" id="customSentences" lang="zh-Hant" spellcheck="false" placeholder="一行一句，標點會保留。例如：&#10;今天天氣很好。&#10;你完成功課了嗎？"></textarea>
       <p class="hint">標點會保留。影相如果分唔清詞定句，請喺框入面改，或者手動搬去另一個框。</p>
       <p class="hint" id="customHint">已輸入 0 個詞、0 句，會自動保存。</p>
-      <div id="ttsWarn" class="warn-box hidden">呢部機搵唔到普通話（zh-CN）語音。自訂默書可能讀成其他語言或無聲——請喺系統設定加「普通話／國語」語音。</div>
+      <div id="ttsWarn" class="warn-box hidden">網絡普通話錄音暫時播唔到。請檢查網絡後再撳播放。如果部機有普通話系統語音，先會用佢後備；冇嘅話唔會改播廣東話。</div>
     </div>
 
     <label class="chk"><input type="checkbox" id="shuffle" checked/> 打亂次序</label>
@@ -248,7 +248,7 @@
       <p class="hint">預設計標點。取消之後只對字，標點漏寫或寫錯都算啱。</p>
       <label class="chk"><input type="checkbox" id="slowReplay"/> 句子慢速再讀一次</label>
       <label class="chk"><input type="checkbox" id="clauseReplay"/> 句子分句再讀（喺，。、；：？！停一停）</label>
-      <p class="hint">整句跟「重複次數」讀。慢速係再讀多一遍。分句再讀只適用於冇預製錄音嘅自訂句子（系統普通話語音）。有預製錄音嘅題目只播錄音。</p>
+      <p class="hint">整句跟「重複次數」讀。慢速係再讀多一遍。分句再讀會逐段再取普通話錄音。有預製錄音嘅題目只播錄音，未能分句。</p>
     </div>
 
     <p class="hint" id="homeHint">內建錄音係預先用普通話（zh-CN）合成，唔靠系統語音，避免讀成廣東話。</p>
@@ -384,6 +384,7 @@ const CLAUSE_GAP_MS = 700;
 /* LOGIC_START */
 let punctMatch = true;
 const CLAUSE_BREAKS = "，。、；：？！";
+const MANDARIN_TTS_CHUNK = 80;
 
 function isPunctChar(ch) {
   if (!ch) return false;
@@ -556,6 +557,32 @@ function splitClauses(text) {
   return parts;
 }
 
+function chunkForTts(text) {
+  const src = String(text || "").trim();
+  if (!src) return [];
+  const max = MANDARIN_TTS_CHUNK;
+  const chunks = [];
+  let buf = "";
+  const bufLen = () => Array.from(buf).length;
+  const flush = () => {
+    if (!buf) return;
+    chunks.push(buf);
+    buf = "";
+  };
+  for (const part of splitClauses(src)) {
+    const chars = Array.from(part);
+    if (chars.length > max) {
+      flush();
+      for (let i = 0; i < chars.length; i += max) chunks.push(chars.slice(i, i + max).join(""));
+      continue;
+    }
+    if (buf && bufLen() + chars.length > max) flush();
+    buf += part;
+  }
+  flush();
+  return chunks;
+}
+
 function alignChars(got, ans) {
   const g = Array.isArray(got) ? got : [...String(got || "")];
   const a = Array.isArray(ans) ? ans : [...String(ans || "")];
@@ -626,7 +653,11 @@ let tileState = [];
 let locked = false;
 let revealed = false;
 let audio = new Audio();
+try { audio.preservesPitch = true; } catch (_) {}
+try { audio.webkitPreservesPitch = true; } catch (_) {}
 let playToken = 0;
+let audioGen = 0;
+let ttsFallbackActive = false;
 let customItems = [];
 let playbackRate = 1;
 let repeatCount = 1;
@@ -850,7 +881,7 @@ function startLabel(mode) {
 
 function homeAudioHint() {
   if (scope === "custom") {
-    return "自訂詞同句用系統 SpeechSynthesis，只揀 zh-CN／普通話語音，明確拒絕粵語／zh-HK。冇預製錄音，手機仍然可能讀錯。";
+    return "自訂詞同句用網絡普通話（zh-CN）錄音播放，唔靠系統語音，避免讀成廣東話。要有網絡。語音服務如果失敗，只有部機本身有普通話語音先會後備；冇就唔會改播廣東話。";
   }
   if (contentKind !== "words" && builtinSentenceList().length === 0) {
     return "內建詞語錄音係預先用普通話（zh-CN）合成。官方句子未加入，唔會自己估題或者用系統語音頂替。";
@@ -995,12 +1026,6 @@ function pickMandarinVoice() {
 function refreshVoices() {
   mandarinVoice = pickMandarinVoice();
   voicesReady = true;
-  const warn = $("ttsWarn");
-  if (scope === "custom") {
-    warn.classList.toggle("hidden", !!mandarinVoice);
-  } else {
-    warn.classList.add("hidden");
-  }
 }
 
 if (window.speechSynthesis) {
@@ -1212,7 +1237,7 @@ function speakOnce(text, rate) {
         resolve();
         return;
       }
-      u.voice = v;
+      try { u.voice = v; } catch (_) {}
       u.lang = "zh-CN";
     } else {
       u.lang = "zh-CN";
@@ -1237,14 +1262,177 @@ function speakOnce(text, rate) {
   });
 }
 
+// Hong Kong iOS often has no zh-CN voice, and speechSynthesis then speaks
+// Cantonese even when lang is zh-CN. Items without a baked MP3 (custom
+// sentences and words) play a Mandarin recording instead. The system voice
+// lock below stays as a fallback only when a real zh-CN voice exists.
+const MANDARIN_TTS_VOICES = ["zhilingfa", "feyinf"];
+const MANDARIN_TTS_TIMEOUT_MS = 15000;
+const TTS_CACHE_MAX = 40;
+const ttsBlobCache = new Map();
+
+function mandarinTtsUrls(text) {
+  return MANDARIN_TTS_VOICES.map((voiceId) => {
+    const q = new URLSearchParams();
+    q.set("voiceId", voiceId);
+    q.set("text", text);
+    q.set("speed", "1");
+    q.set("volume", "100");
+    q.set("audioType", "mp3");
+    return "https://dds.dui.ai/runtime/v1/synthesize?" + q.toString();
+  });
+}
+
+function rememberTtsBlob(url, blobUrl) {
+  if (ttsBlobCache.has(url)) {
+    if (ttsBlobCache.get(url) !== blobUrl) {
+      try { URL.revokeObjectURL(blobUrl); } catch (_) {}
+    }
+    return ttsBlobCache.get(url);
+  }
+  ttsBlobCache.set(url, blobUrl);
+  while (ttsBlobCache.size > TTS_CACHE_MAX) {
+    const oldest = ttsBlobCache.keys().next().value;
+    const old = ttsBlobCache.get(oldest);
+    ttsBlobCache.delete(oldest);
+    try { URL.revokeObjectURL(old); } catch (_) {}
+  }
+  return blobUrl;
+}
+
+function warmTtsBlob(url) {
+  if (ttsBlobCache.has(url) || typeof fetch !== "function") return;
+  fetch(url, { mode: "cors", credentials: "omit" }).then(async (res) => {
+    const ctype = (res.headers.get("content-type") || "").toLowerCase();
+    if (!res.ok || ctype.indexOf("audio/") !== 0) return;
+    const blob = await res.blob();
+    if (!blob || blob.size < 200) return;
+    rememberTtsBlob(url, URL.createObjectURL(blob));
+  }).catch(() => {});
+}
+
+function noteTtsFallback(playedSystem) {
+  ttsFallbackActive = true;
+  const warn = $("ttsWarn");
+  if (warn) warn.classList.remove("hidden");
+  setPlayStatus(playedSystem
+    ? "網絡普通話錄音失敗，已改用系統普通話語音。"
+    : "網絡普通話錄音播唔到。請檢查網絡後再撳播放。為免讀成廣東話，冇改用系統語音。");
+}
+
+function clearTtsFallback() {
+  ttsFallbackActive = false;
+  const warn = $("ttsWarn");
+  if (warn) warn.classList.add("hidden");
+}
+
+function playSrcDetailed(src, rate) {
+  return new Promise((resolve) => {
+    const token = playToken;
+    const gen = ++audioGen;
+    let settled = false;
+    let timer = 0;
+    let watch = 0;
+    const finish = (status) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(watch);
+      clearTimeout(timer);
+      if (gen === audioGen) {
+        audio.onended = null;
+        audio.onerror = null;
+        audio.onloadedmetadata = null;
+        audio.onplaying = null;
+      }
+      resolve(status);
+    };
+    const applyRate = () => {
+      try { audio.playbackRate = rate; } catch (_) {}
+    };
+    try { audio.pause(); } catch (_) {}
+    audio.onended = () => finish(token === playToken ? "ended" : "aborted");
+    audio.onerror = () => {
+      const code = audio.error && audio.error.code;
+      if (code === 1 && token === playToken) return;
+      finish(token === playToken ? "error" : "aborted");
+    };
+    audio.onloadedmetadata = () => { if (gen === audioGen) applyRate(); };
+    audio.onplaying = () => {
+      if (gen !== audioGen) return;
+      clearTimeout(timer);
+      timer = 0;
+      applyRate();
+    };
+    try { audio.src = src; } catch (_) { finish("error"); return; }
+    applyRate();
+    watch = setInterval(() => {
+      if (token !== playToken) finish("aborted");
+    }, 80);
+    timer = setTimeout(() => {
+      if (settled || gen !== audioGen) return;
+      try { audio.pause(); } catch (_) {}
+      finish(token === playToken ? "error" : "aborted");
+    }, MANDARIN_TTS_TIMEOUT_MS);
+    const started = audio.play();
+    if (started && typeof started.then === "function") {
+      started.then(() => { if (gen === audioGen) applyRate(); }).catch(() => {
+        finish(token === playToken ? "error" : "aborted");
+      });
+    }
+  });
+}
+
+async function playRemoteChunk(text, rate) {
+  const urls = mandarinTtsUrls(text);
+  for (let i = 0; i < urls.length; i++) {
+    const cached = ttsBlobCache.get(urls[i]);
+    if (!cached) continue;
+    const status = await playSrcDetailed(cached, rate);
+    if (status === "ended" || status === "aborted") return status;
+    ttsBlobCache.delete(urls[i]);
+    try { URL.revokeObjectURL(cached); } catch (_) {}
+  }
+  for (let i = 0; i < urls.length; i++) {
+    warmTtsBlob(urls[i]);
+    const status = await playSrcDetailed(urls[i], rate);
+    if (status === "ended" || status === "aborted") return status;
+  }
+  return "error";
+}
+
+async function playMandarinText(text, rate) {
+  const token = playToken;
+  const chunks = chunkForTts(text);
+  if (!chunks.length) return;
+  let usedFallback = false;
+  let remoteOk = false;
+  for (let i = 0; i < chunks.length; i++) {
+    if (token !== playToken) return;
+    const status = await playRemoteChunk(chunks[i], rate);
+    if (token !== playToken || status === "aborted") return;
+    if (status === "ended") {
+      remoteOk = true;
+    } else {
+      usedFallback = true;
+      refreshVoices();
+      const voice = mandarinVoice;
+      if (voice && !isCantoneseLike(voice)) {
+        noteTtsFallback(true);
+        await speakOnce(chunks[i], rate);
+      } else {
+        noteTtsFallback(false);
+      }
+      if (token !== playToken) return;
+    }
+    if (i < chunks.length - 1) await sleep(220);
+  }
+  if (token !== playToken) return;
+  if (!usedFallback && remoteOk) clearTtsFallback();
+}
+
 function playItemOnce(item, rate) {
   if (item.a) return playAudioOnce(item.a, rate);
-  if (!mandarinVoice) refreshVoices();
-  if (!mandarinVoice && voicesReady) {
-    const fb = $("fb");
-    if (fb) fb.innerHTML = '<span class="bad">搵唔到普通話語音</span> · 系統可能讀唔出或讀錯。';
-  }
-  return speakOnce(item.w, rate);
+  return playMandarinText(item.w, rate);
 }
 
 async function playCurrent() {
@@ -1255,7 +1443,7 @@ async function playCurrent() {
   const rate = playbackRate;
   const sentence = usesSentenceUI(item);
 
-  if (!sentence) setPlayStatus("");
+  if (!sentence) setPlayStatus(item.a ? "" : "讀緊普通話…");
   for (let i = 0; i < times; i++) {
     if (token !== playToken) return;
     if (sentence) setPlayStatus(times > 1 ? ("整句朗讀 " + (i + 1) + "／" + times) : "整句朗讀");
@@ -1284,13 +1472,13 @@ async function playCurrent() {
           await sleep(CLAUSE_GAP_MS);
           if (token !== playToken) return;
           setPlayStatus("分句 " + (c + 1) + "／" + clauses.length);
-          await speakOnce(clauses[c], rate);
+          await playMandarinText(clauses[c], rate);
         }
       }
     }
   }
 
-  if (token === playToken && !(sentence && clauseReplay && item.a)) setPlayStatus("");
+  if (token === playToken && !ttsFallbackActive && !(sentence && clauseReplay && item.a)) setPlayStatus("");
 }
 
 function charPool() {
@@ -1994,8 +2182,8 @@ $("start").onclick = () => {
     list = listForKind(parts.words, parts.sents);
     customItems = list.slice();
     refreshVoices();
-    if (!mandarinVoice) {
-      const go = confirm("搵唔到普通話（zh-CN）語音，自訂朗讀可能唔啱或無聲。仍然開始？");
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      const go = confirm("而家似乎冇網絡。自訂朗讀要用網絡先聽到普通話錄音；冇網絡又冇系統普通話語音時，唔會改播廣東話。仍然開始？");
       if (!go) return;
     }
   } else {
